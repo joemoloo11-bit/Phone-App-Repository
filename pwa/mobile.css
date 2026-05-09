@@ -1,0 +1,110 @@
+/* Mobile-only overrides. Applied at <=768px width.
+   - Respects iOS safe areas (notch + home indicator)
+   - Hides desktop chrome (drag-region title bar, sidebar)
+   - Provides a fixed bottom tab nav (rendered by MobileNav.tsx) */
+
+@media (max-width: 768px) {
+  /* Hide the desktop title bar (window controls) — meaningless on phone. */
+  .drag-region {
+    display: none !important;
+  }
+
+  /* Hide the desktop sidebar — replaced by bottom MobileNav. */
+  body aside {
+    display: none !important;
+  }
+
+  /* Use dynamic viewport height so the iOS keyboard / URL bar collapse
+     don't leave dead space. */
+  html,
+  body,
+  #root {
+    height: 100dvh !important;
+  }
+
+  /* Vault's Layout outer div — pad for status bar (top) + nav/home indicator (bottom). */
+  body div.h-screen.flex.flex-col {
+    height: 100dvh !important;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: calc(56px + env(safe-area-inset-bottom));
+    box-sizing: border-box;
+  }
+
+  /* Smooth iOS-style scrolling inside the main content area. */
+  body div.h-screen.flex.flex-col main {
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* Inputs and textareas should NOT inherit the no-select rule on mobile. */
+  input,
+  textarea,
+  select,
+  [contenteditable] {
+    user-select: text;
+    -webkit-user-select: text;
+  }
+}
+
+/* ─── Mobile bottom nav (MobileNav component) ─── */
+
+.mobile-nav {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .mobile-nav {
+    display: block;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: rgba(13, 17, 23, 0.94);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border-top: 1px solid #21262d;
+    padding-bottom: env(safe-area-inset-bottom);
+    z-index: 1000;
+  }
+
+  .mobile-nav-inner {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    height: 56px;
+  }
+
+  .mobile-nav-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    color: #8b949e;
+    text-decoration: none;
+    transition: color 0.15s;
+    font-size: 9.5px;
+    padding: 4px 2px;
+    min-width: 0;
+  }
+
+  .mobile-nav-item:active {
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .mobile-nav-item.active {
+    color: #14b8a6;
+  }
+
+  .mobile-nav-item svg {
+    flex-shrink: 0;
+  }
+
+  .mobile-nav-item span {
+    line-height: 1;
+    font-weight: 500;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+  }
+}
