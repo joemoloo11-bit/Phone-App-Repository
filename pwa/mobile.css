@@ -22,17 +22,35 @@
     height: 100dvh !important;
   }
 
-  /* Vault's Layout outer div — pad for status bar (top) + nav/home indicator (bottom). */
+  /* Vault's Layout outer div — pad for status bar (top) + nav/home indicator (bottom).
+     Subtle radial gradient gives empty pages visual depth instead of a flat void. */
   body div.h-screen.flex.flex-col {
     height: 100dvh !important;
     padding-top: env(safe-area-inset-top);
     padding-bottom: calc(56px + max(10px, env(safe-area-inset-bottom) - 20px));
     box-sizing: border-box;
+    background:
+      radial-gradient(ellipse 80% 60% at 50% 0%, rgba(20, 184, 166, 0.06), transparent 70%),
+      radial-gradient(ellipse 60% 40% at 50% 100%, rgba(20, 184, 166, 0.04), transparent 70%),
+      #0d1117 !important;
   }
 
   /* Smooth iOS-style scrolling inside the main content area. */
   body div.h-screen.flex.flex-col main {
     -webkit-overflow-scrolling: touch;
+    background: transparent !important;
+  }
+
+  /* Empty-state blocks (`py-20 text-center`) — let them fill the remaining
+     vertical space so they feel centered rather than floating near the top. */
+  .py-20.text-center {
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+    min-height: 50vh;
+    display: flex !important;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
   }
 
   /* Inputs and textareas should NOT inherit the no-select rule on mobile. */
@@ -117,12 +135,33 @@
     bottom: 0;
     left: 0;
     right: 0;
-    background: rgba(13, 17, 23, 0.94);
-    backdrop-filter: blur(14px);
-    -webkit-backdrop-filter: blur(14px);
-    border-top: 1px solid #21262d;
+    background: linear-gradient(
+      to bottom,
+      rgba(13, 17, 23, 0.85) 0%,
+      rgba(13, 17, 23, 0.98) 40%,
+      #0d1117 100%
+    );
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
     padding-bottom: max(10px, env(safe-area-inset-bottom) - 20px);
     z-index: 1000;
+  }
+
+  /* Subtle hairline above the nav — lighter than a 1px solid border */
+  .mobile-nav::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(
+      to right,
+      transparent,
+      rgba(139, 148, 158, 0.18) 20%,
+      rgba(139, 148, 158, 0.18) 80%,
+      transparent
+    );
   }
 
   .mobile-nav-inner {
@@ -178,25 +217,25 @@
   .update-btn {
     display: flex;
     position: fixed;
-    top: calc(env(safe-area-inset-top) + 8px);
-    right: 12px;
+    top: calc(env(safe-area-inset-top) + 10px);
+    right: 14px;
     z-index: 1100;
-    width: 36px;
-    height: 36px;
+    width: 32px;
+    height: 32px;
     align-items: center;
     justify-content: center;
-    background: rgba(13, 17, 23, 0.7);
+    background: rgba(255, 255, 255, 0.04);
     color: #8b949e;
-    border: 1px solid #21262d;
-    border-radius: 50%;
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
+    border: none;
+    border-radius: 8px;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
     cursor: pointer;
     transition: color 0.15s, background 0.15s;
   }
 
   .update-btn:active {
-    background: rgba(20, 184, 166, 0.15);
+    background: rgba(20, 184, 166, 0.18);
     color: #14b8a6;
   }
 
