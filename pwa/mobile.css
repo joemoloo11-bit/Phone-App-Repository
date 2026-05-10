@@ -26,7 +26,7 @@
   body div.h-screen.flex.flex-col {
     height: 100dvh !important;
     padding-top: env(safe-area-inset-top);
-    padding-bottom: calc(56px + env(safe-area-inset-bottom));
+    padding-bottom: calc(56px + max(10px, env(safe-area-inset-bottom) - 20px));
     box-sizing: border-box;
   }
 
@@ -43,6 +43,31 @@
     user-select: text;
     -webkit-user-select: text;
   }
+
+  /* ─── Page-level layout fixes ───────────────────────────────────────────
+     Vault's pages were laid out for desktop width. Stack horizontal grids
+     and let header rows wrap so titles + buttons don't crush each other. */
+
+  /* 3-column stat-card rows (Budget Setup) → stacked */
+  .grid.grid-cols-3 {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* Page headers: "Title left, action buttons right" — let them wrap */
+  .flex.items-start.justify-between,
+  .flex.items-center.justify-between {
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+
+  /* Tighten card padding so content doesn't waste edges */
+  .p-6 { padding: 1rem !important; }
+  .px-6 { padding-left: 1rem !important; padding-right: 1rem !important; }
+  .py-6 { padding-top: 1rem !important; padding-bottom: 1rem !important; }
+
+  /* Soften oversized headings on small screens */
+  .text-3xl { font-size: 1.5rem !important; line-height: 1.875rem !important; }
+  .text-2xl { font-size: 1.25rem !important; line-height: 1.625rem !important; }
 }
 
 /* ─── Mobile bottom nav (MobileNav component) ─── */
@@ -62,7 +87,7 @@
     backdrop-filter: blur(14px);
     -webkit-backdrop-filter: blur(14px);
     border-top: 1px solid #21262d;
-    padding-bottom: env(safe-area-inset-bottom);
+    padding-bottom: max(10px, env(safe-area-inset-bottom) - 20px);
     z-index: 1000;
   }
 
