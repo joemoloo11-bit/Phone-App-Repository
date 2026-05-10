@@ -13,12 +13,14 @@ import App from '@renderer/App'
 import '@renderer/index.css'
 import './mobile.css'
 import MobileNav from './MobileNav'
+import UpdateButton from './UpdateButton'
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
     <HashRouter>
       <App />
       <MobileNav />
+      <UpdateButton />
     </HashRouter>
   </React.StrictMode>,
 )

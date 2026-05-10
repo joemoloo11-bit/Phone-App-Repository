@@ -48,8 +48,10 @@
      Vault's pages were laid out for desktop width. Stack horizontal grids
      and let header rows wrap so titles + buttons don't crush each other. */
 
-  /* 3-column stat-card rows (Budget Setup) → stacked */
-  .grid.grid-cols-3 {
+  /* Stack 2 and 3 column grids (Budget Setup stat cards, Export options,
+     Charts side-by-side panels). */
+  .grid.grid-cols-3,
+  .grid.grid-cols-2 {
     grid-template-columns: 1fr !important;
   }
 
@@ -68,6 +70,38 @@
   /* Soften oversized headings on small screens */
   .text-3xl { font-size: 1.5rem !important; line-height: 1.875rem !important; }
   .text-2xl { font-size: 1.25rem !important; line-height: 1.625rem !important; }
+
+  /* ─── Touch targets (Apple HIG: minimum 44pt) ────────────────────────── */
+
+  /* Buttons that use Vault's `h-7` / `h-9` size variants are too small for
+     thumbs. Bump every button and link to a comfortable tap height. */
+  button:not(.mobile-nav-item):not(.update-btn),
+  a[role='button'],
+  [type='button'],
+  [type='submit'] {
+    min-height: 44px;
+  }
+
+  /* Give buttons a bit more breathing room horizontally */
+  .px-3 { padding-left: 0.875rem !important; padding-right: 0.875rem !important; }
+  .px-4 { padding-left: 1rem !important; padding-right: 1rem !important; }
+
+  /* Slightly larger body text and small text — desktop sizing feels tiny */
+  .text-xs { font-size: 0.8125rem !important; line-height: 1.125rem !important; }
+  .text-sm { font-size: 0.9375rem !important; line-height: 1.375rem !important; }
+
+  /* Inputs need bigger tap area + bigger text (also avoids iOS zoom on focus) */
+  input:not([type='checkbox']):not([type='radio']),
+  textarea,
+  select {
+    font-size: 16px !important;
+    min-height: 44px !important;
+  }
+
+  /* Cards get a little more vertical breathing room between items */
+  .space-y-2 > * + * { margin-top: 0.625rem !important; }
+  .space-y-3 > * + * { margin-top: 0.875rem !important; }
+  .space-y-4 > * + * { margin-top: 1.125rem !important; }
 }
 
 /* ─── Mobile bottom nav (MobileNav component) ─── */
@@ -131,5 +165,51 @@
     overflow: hidden;
     text-overflow: ellipsis;
     max-width: 100%;
+  }
+}
+
+/* ─── Update button (top-right, mobile only) ─── */
+
+.update-btn {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .update-btn {
+    display: flex;
+    position: fixed;
+    top: calc(env(safe-area-inset-top) + 8px);
+    right: 12px;
+    z-index: 1100;
+    width: 36px;
+    height: 36px;
+    align-items: center;
+    justify-content: center;
+    background: rgba(13, 17, 23, 0.7);
+    color: #8b949e;
+    border: 1px solid #21262d;
+    border-radius: 50%;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    cursor: pointer;
+    transition: color 0.15s, background 0.15s;
+  }
+
+  .update-btn:active {
+    background: rgba(20, 184, 166, 0.15);
+    color: #14b8a6;
+  }
+
+  .update-btn:disabled {
+    opacity: 0.6;
+  }
+
+  .update-btn-spin {
+    animation: update-btn-spin 1s linear infinite;
+  }
+
+  @keyframes update-btn-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
   }
 }
