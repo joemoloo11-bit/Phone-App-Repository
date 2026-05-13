@@ -1,12 +1,13 @@
 import { useState, useEffect } from 'react'
-import { CheckCircle2, AlertTriangle, XCircle, Target, TrendingUp, DollarSign, ArrowRightLeft } from 'lucide-react'
+import { CheckCircle2, AlertTriangle, XCircle, Target, TrendingUp, DollarSign, ArrowRightLeft, Calendar, ListChecks } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@renderer/components/ui/card'
 import { Badge } from '@renderer/components/ui/badge'
 import { Progress } from '@renderer/components/ui/progress'
 import { formatCurrency, getCurrentWeekStart, getWeekLabel } from '@renderer/lib/utils'
-import { toWeeklyAmount, getNextPayday, daysUntilPayday } from '@renderer/types'
-import type { Account, IncomeSource, Expense, BalanceLog, Goal } from '@renderer/types'
-import { format } from 'date-fns'
+import { toWeeklyAmount, getNextPayday, daysUntilPayday, getUpcomingPaydays, computeWeeklyCashflow, computePayEventContribution } from '@renderer/types'
+import type { Account, IncomeSource, Expense, BalanceLog, Goal, WeeklyAllocation } from '@renderer/types'
+import { format, addDays } from 'date-fns'
+import { Link } from 'react-router-dom'
 
 function toMonthlyAmount(amount: number, freq: string): number {
   switch (freq) {
@@ -25,7 +26,7 @@ interface DashboardData {
   expenses: Expense[]
   latestLogs: BalanceLog[]
   goals: Goal[]
-  weeklyAllocations: unknown[]
+  weeklyAllocations: WeeklyAllocation[]
 }
 
 function getCushionScore(weeklyIncome: number, weeklyExpenses: number, latestLogs: BalanceLog[], accounts: Account[], expenses: Expense[]): number {
@@ -38,7 +39,7 @@ function getCushionScore(weeklyIncome: number, weeklyExpenses: number, latestLog
     const log = latestLogs.find(l => l.account_id === acc.id)
     if (!log) return 0
     const monthlyBills = expenses
-      .filter(e => e.account_id === acc.id)
+      .filter(e => (e.save_account_id ?? e.account_id) === acc.id)
       .reduce((sum, e) => sum + toMonthlyAmount(e.amount, e.frequency), 0)
     if (monthlyBills === 0) return 40
     const months = log.balance / monthlyBills
@@ -67,20 +68,21 @@ export default function Dashboard() {
         window.api.goals.getAll(),
         window.api.allocations.getWeek(weekStart),
       ])
-      setData({ accounts, income, expenses, latestLogs, goals: goals as Goal[], weeklyAllocations })
+      setData({ accounts, income, expenses, latestLogs, goals: goals as Goal[], weeklyAllocations: weeklyAllocations as WeeklyAllocation[] })
       setLoading(false)
     }
     load()
   }, [])
 
-  const { accounts, income, expenses, latestLogs, goals } = data
+  const { accounts, income, expenses, latestLogs, goals, weeklyAllocations: allocationRecords } = data
 
-  const weeklyIncome = income.reduce((sum, s) => sum + toWeeklyAmount(s.amount, s.frequency), 0)
+  const cf = computeWeeklyCashflow(expenses, income, goals as Goal[])
+  const weeklyIncome = cf.weeklyIncome
+  // Raw bill cost (used for the Weekly Expenses metric card — "what bills actually cost")
   const weeklyExpenses = expenses.reduce((sum, e) => sum + toWeeklyAmount(e.amount, e.frequency), 0)
-  const activeGoalContributions = (goals as Goal[])
-    .filter(g => g.status === 'active')
-    .reduce((sum, g) => sum + g.weekly_contribution, 0)
-  const freeCashflow = weeklyIncome - weeklyExpenses - activeGoalContributions
+  const weeklyAllocations = cf.totalAllocations
+  const activeGoalContributions = cf.goalContributions
+  const freeCashflow = cf.freeCashflow
   const cushionScore = getCushionScore(weeklyIncome, weeklyExpenses, latestLogs, accounts, expenses)
 
   // Bills due this week (day of month 1-7 range around now)
@@ -102,7 +104,7 @@ export default function Dashboard() {
     const log = latestLogs.find(l => l.account_id === acc.id)
     if (!log) return 'no-data'
     const monthlyBills = expenses
-      .filter(e => e.account_id === acc.id)
+      .filter(e => (e.save_account_id ?? e.account_id) === acc.id)
       .reduce((sum, e) => sum + toMonthlyAmount(e.amount, e.frequency), 0)
     if (monthlyBills === 0) return 'covered'
     const months = log.balance / monthlyBills
@@ -151,15 +153,31 @@ export default function Dashboard() {
 
       {/* Key numbers */}
       <div className="grid grid-cols-3 gap-4">
-        <MetricCard label="Weekly Income" value={weeklyIncome} color="text-success" icon={DollarSign} accent="border-success" />
-        <MetricCard label="Weekly Expenses" value={weeklyExpenses} color="text-warning" icon={TrendingUp} accent="border-warning" />
+        <MetricCard
+          label="Weekly Income"
+          value={weeklyIncome}
+          color="text-success"
+          icon={DollarSign}
+          accent="border-success"
+          sub={income.length > 1 ? `Combined from ${income.length} pays (weekly avg)` : 'Weekly average'}
+        />
+        <MetricCard
+          label="Weekly Allocations"
+          value={weeklyAllocations}
+          color="text-warning"
+          icon={TrendingUp}
+          accent="border-warning"
+          sub={cf.percentageAllocations > 0
+            ? `${formatCurrency(cf.fixedAllocations)} fixed + ${formatCurrency(cf.percentageAllocations)} %-based`
+            : `Bills + buffers (raw cost ${formatCurrency(weeklyExpenses)})`}
+        />
         <MetricCard
           label="Free Cashflow"
           value={freeCashflow}
           color={freeCashflow >= 0 ? 'text-success' : 'text-danger'}
           icon={TrendingUp}
           accent={freeCashflow >= 0 ? 'border-success' : 'border-danger'}
-          sub={freeCashflow >= 0 ? 'after all expenses & goals' : 'over budget'}
+          sub={`${formatCurrency(weeklyIncome)} − ${formatCurrency(weeklyAllocations)}${activeGoalContributions > 0 ? ` − ${formatCurrency(activeGoalContributions)} goals` : ''}`}
           negative={freeCashflow < 0}
         />
       </div>
@@ -190,6 +208,226 @@ export default function Dashboard() {
           })}
         </div>
       )}
+
+      {/* This Week — prioritized action list */}
+      {(() => {
+        const todayStart = new Date()
+        todayStart.setHours(0, 0, 0, 0)
+        const weekEnd = new Date(todayStart)
+        weekEnd.setDate(weekEnd.getDate() + 7)
+
+        const items: { label: string; sub?: string; tone: 'accent' | 'warning' | 'danger' | 'muted'; href?: string }[] = []
+
+        // 1. Pay arriving this week
+        income.filter(s => s.payday_reference).forEach(src => {
+          const next = getNextPayday(src.payday_reference!, src.frequency)
+          if (next < weekEnd) {
+            const days = Math.round((next.getTime() - todayStart.getTime()) / 86400000)
+            const when = days === 0 ? 'today' : days === 1 ? 'tomorrow' : format(next, 'EEEE')
+            items.push({
+              label: `${src.person_name}'s pay arrives ${when}`,
+              sub: `${formatCurrency(src.amount)} (${src.frequency})`,
+              tone: days <= 1 ? 'accent' : 'muted',
+            })
+          }
+        })
+
+        // 2. Allocations not funded
+        const fundedCount = allocationRecords.filter(a => a.funded === 1).length
+        if (accounts.length > 0 && fundedCount < accounts.length) {
+          items.push({
+            label: `Move money to envelopes — ${fundedCount}/${accounts.length} done`,
+            sub: 'Mark each account funded once you\'ve transferred',
+            tone: fundedCount === 0 ? 'warning' : 'muted',
+            href: '/weekly',
+          })
+        }
+
+        // 3. Bills due in next 7 days
+        const billsThisWeek = billsDueSoon.filter(b => b.daysUntil <= 7)
+        if (billsThisWeek.length > 0) {
+          items.push({
+            label: `${billsThisWeek.length} bill${billsThisWeek.length === 1 ? '' : 's'} due this week`,
+            sub: billsThisWeek.slice(0, 3).map(b => `${b.name} (${b.daysUntil}d)`).join(' · '),
+            tone: billsThisWeek.some(b => b.daysUntil <= 2) ? 'danger' : 'warning',
+          })
+        }
+
+        // 4. Sweep alerts
+        const sweeps = accounts.filter(acc => {
+          if (!acc.buffer_target || !acc.sweep_amount || !acc.sweep_to_account_id) return false
+          const log = latestLogs.find(l => l.account_id === acc.id)
+          if (!log) return false
+          return log.balance >= acc.buffer_target + acc.sweep_amount
+        })
+        if (sweeps.length > 0) {
+          items.push({
+            label: `${sweeps.length} sweep${sweeps.length === 1 ? '' : 's'} ready to move`,
+            sub: sweeps.map(s => `${s.name}: ${formatCurrency(s.sweep_amount!)}`).join(' · '),
+            tone: 'accent',
+            href: '/tracker',
+          })
+        }
+
+        if (items.length === 0) return null
+
+        const toneClasses = {
+          accent: 'text-accent border-accent/30 bg-accent/5',
+          warning: 'text-warning border-warning/30 bg-warning/5',
+          danger: 'text-danger border-danger/30 bg-danger/5',
+          muted: 'text-text-secondary border-border bg-surface-2/40',
+        }
+
+        return (
+          <Card>
+            <CardHeader className="flex flex-row items-center gap-2">
+              <ListChecks size={14} className="text-accent" />
+              <CardTitle>This Week</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-2">
+                {items.map((it, i) => {
+                  const inner = (
+                    <div className={`rounded-lg border p-3 ${toneClasses[it.tone]}`}>
+                      <p className="text-sm font-medium">{it.label}</p>
+                      {it.sub && <p className="text-[11px] text-text-muted mt-0.5 truncate">{it.sub}</p>}
+                    </div>
+                  )
+                  return it.href
+                    ? <Link key={i} to={it.href} className="block hover:opacity-80 transition-opacity">{inner}</Link>
+                    : <div key={i}>{inner}</div>
+                })}
+              </div>
+            </CardContent>
+          </Card>
+        )
+      })()}
+
+      {/* Pay calendar — next 8 weeks */}
+      {income.some(s => s.payday_reference) && (() => {
+        const weeksAhead = 8
+        const todayStart = new Date()
+        todayStart.setHours(0, 0, 0, 0)
+
+        // Build week buckets
+        const weeks = Array.from({ length: weeksAhead }, (_, i) => {
+          const start = addDays(todayStart, i * 7)
+          const end = addDays(start, 7)
+          return { start, end, events: [] as { person: string; amount: number; date: Date }[] }
+        })
+
+        income.filter(s => s.payday_reference).forEach(src => {
+          const dates = getUpcomingPaydays(src.payday_reference!, src.frequency, weeksAhead, todayStart)
+          dates.forEach(d => {
+            const wk = weeks.find(w => d >= w.start && d < w.end)
+            if (wk) wk.events.push({ person: src.person_name, amount: src.amount, date: d })
+          })
+        })
+
+        // Per-week remaining uses the alternating-pay model (same as Weekly Move):
+        // For each pay event arriving that week, compute that person's deduction:
+        //   attributed (funded_by = them) × their pay period in weeks
+        //   + shared × 1 week (one week's worth of joint expenses per pay)
+        //   + goals × 1 week
+        // Then remaining = sum of arrivings − sum of per-pay deductions for the week.
+        // For variable pay (min/max set), compute low/avg/high so the "shortfall"
+        // flag only fires if even MAX pay can't cover the outflow.
+        const weekTotals = weeks.map(w => w.events.reduce((s, e) => s + e.amount, 0))
+        type WeekMath = { low: number; avg: number; high: number; hasRange: boolean }
+        const weekRemainings: WeekMath[] = weeks.map(w => {
+          let low = 0, avg = 0, high = 0
+          let hasRange = false
+          for (const event of w.events) {
+            const payer = income.find(i => i.person_name === event.person)
+            if (!payer) continue
+            const avgContrib = computePayEventContribution(payer, event.amount, expenses, cf)
+            avg += avgContrib.arriving - avgContrib.totalOutflow
+            const minPay = payer.min_amount ?? event.amount
+            const maxPay = payer.max_amount ?? event.amount
+            if (minPay !== event.amount || maxPay !== event.amount) hasRange = true
+            const minContrib = computePayEventContribution(payer, minPay, expenses, cf)
+            const maxContrib = computePayEventContribution(payer, maxPay, expenses, cf)
+            low += minContrib.arriving - minContrib.totalOutflow
+            high += maxContrib.arriving - maxContrib.totalOutflow
+          }
+          return { low, avg, high, hasRange }
+        })
+
+        return (
+          <Card>
+            <CardHeader className="flex flex-row items-center gap-2">
+              <Calendar size={14} className="text-accent" />
+              <CardTitle>Pay Calendar — Next 8 Weeks</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-8 gap-2">
+                {weeks.map((w, i) => {
+                  const remaining = weekRemainings[i]
+                  const isEmpty = w.events.length === 0
+                  // Shortfall: even the HIGH end of the pay range can't cover outflow.
+                  // (If only the low end can't, but the high end can, it's a maybe-lean week,
+                  // not a definite shortfall — show amber instead of red.)
+                  const isShortfall = !isEmpty && remaining.high < 0
+                  const isMaybeLean = !isEmpty && !isShortfall && remaining.low < 0
+                  const baseClasses = isEmpty
+                    ? 'border-border bg-surface-2/30 text-text-muted'
+                    : isShortfall
+                      ? 'border-danger/40 bg-danger/5'
+                      : isMaybeLean
+                        ? 'border-warning/40 bg-warning/5'
+                        : 'border-accent/30 bg-accent/5'
+                  return (
+                    <div key={i} className={`rounded-lg border p-2 min-h-[100px] flex flex-col ${baseClasses}`}>
+                      <p className="text-[10px] uppercase tracking-wider text-text-muted">
+                        {format(w.start, 'd MMM')}
+                      </p>
+                      {isEmpty ? (
+                        <p className="text-[10px] text-text-muted mt-1">No pay</p>
+                      ) : (
+                        <div className="mt-1 space-y-0.5 flex-1">
+                          {w.events.map((e, j) => {
+                            const src = income.find(i => i.person_name === e.person)
+                            const hasRange = src && (src.min_amount != null || src.max_amount != null)
+                            return (
+                            <div key={j}>
+                              <p className="text-[11px] text-text-primary truncate">{e.person}</p>
+                              <p className="text-[10px] text-text-muted tabular-nums">{formatCurrency(e.amount)}</p>
+                              {hasRange && (
+                                <p className="text-[9px] text-accent/70 tabular-nums">
+                                  {src!.min_amount != null ? formatCurrency(src!.min_amount) : '—'}
+                                  {'–'}
+                                  {src!.max_amount != null ? formatCurrency(src!.max_amount) : '—'}
+                                </p>
+                              )}
+                            </div>
+                            )
+                          })}
+                        </div>
+                      )}
+                      {!isEmpty && (
+                        <div className="mt-1.5 pt-1.5 border-t border-border/50">
+                          <p className="text-[9px] uppercase tracking-wider text-text-muted">Remaining</p>
+                          <p className={`text-[11px] font-semibold tabular-nums ${remaining.avg >= 0 ? 'text-success' : 'text-danger'}`}>
+                            {formatCurrency(remaining.avg)}
+                          </p>
+                          {remaining.hasRange && (
+                            <p className="text-[9px] text-text-muted tabular-nums">
+                              {formatCurrency(remaining.low)}–{formatCurrency(remaining.high)}
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+              <p className="text-[10px] text-text-muted mt-3">
+                Remaining uses the alternating-pay model — each pay event covers its person's attributed items (full pay period) + one week of joint expenses & goals. Red weeks are short.
+              </p>
+            </CardContent>
+          </Card>
+        )
+      })()}
 
       {/* Sweep alerts */}
       {(() => {

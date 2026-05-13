@@ -8,8 +8,10 @@ import {
   dbGetAccounts, dbSaveAccount, dbUpdateAccount, dbDeleteAccount,
   dbGetIncomeSources, dbSaveIncomeSource, dbUpdateIncomeSource, dbDeleteIncomeSource,
   dbGetExpenses, dbSaveExpense, dbUpdateExpense, dbDeleteExpense,
-  dbGetBalanceLogs, dbGetLatestBalances, dbSaveBalanceLog,
+  dbGetBalanceLogs, dbGetLatestBalances, dbSaveBalanceLog, dbDeleteBalanceLog,
   dbGetWeeklyAllocations, dbUpsertWeeklyAllocation, dbSetAllocationFunded,
+  dbGetTransfersForWeek, dbSaveTransfer, dbDeleteTransfer,
+  dbGetPayOverridesForWeek, dbUpsertPayOverride, dbDeletePayOverride,
   dbGetGoals, dbSaveGoal, dbUpdateGoal, dbDeleteGoal,
   dbSaveGoalSnapshot, dbGetGoalSnapshots,
   dbGetTestRuns, dbSaveTestRun, dbUpdateTestRun, dbDeleteTestRun
@@ -88,11 +90,22 @@ app.whenReady().then(() => {
   ipcMain.handle('balances:getAll', (_, accountId) => dbGetBalanceLogs(accountId))
   ipcMain.handle('balances:getLatest', () => dbGetLatestBalances())
   ipcMain.handle('balances:save', (_, data) => dbSaveBalanceLog(data))
+  ipcMain.handle('balances:delete', (_, id) => dbDeleteBalanceLog(id))
 
   // ─── Weekly Allocations ────────────────────────────────────────────────────
   ipcMain.handle('allocations:getWeek', (_, weekStart) => dbGetWeeklyAllocations(weekStart))
   ipcMain.handle('allocations:upsert', (_, data) => dbUpsertWeeklyAllocation(data))
   ipcMain.handle('allocations:setFunded', (_, id, funded) => dbSetAllocationFunded(id, funded))
+
+  // ─── Transfers (Weekly Move) ──────────────────────────────────────────────
+  ipcMain.handle('transfers:getWeek', (_, weekStart) => dbGetTransfersForWeek(weekStart))
+  ipcMain.handle('transfers:save', (_, data) => dbSaveTransfer(data))
+  ipcMain.handle('transfers:delete', (_, id) => dbDeleteTransfer(id))
+
+  // ─── Pay event overrides (per-week pay adjustments) ───────────────────────
+  ipcMain.handle('payOverrides:getWeek', (_, weekStart) => dbGetPayOverridesForWeek(weekStart))
+  ipcMain.handle('payOverrides:upsert', (_, data) => dbUpsertPayOverride(data))
+  ipcMain.handle('payOverrides:delete', (_, incomeSourceId, weekStart) => dbDeletePayOverride(incomeSourceId, weekStart))
 
   // ─── Goals ────────────────────────────────────────────────────────────────
   ipcMain.handle('goals:getAll', () => dbGetGoals())
@@ -189,7 +202,9 @@ app.whenReady().then(() => {
       }
       const tagVersion = release.tag_name.replace(/^v/, '')
       const current = app.getVersion()
-      const exeAsset = release.assets.find(a => /^Vault Setup .+\.exe$/.test(a.name))
+      // GitHub replaces spaces with dots in uploaded asset names, so accept both.
+      // Local build: "Vault Setup 1.7.2.exe" — GitHub upload: "Vault.Setup.1.7.2.exe"
+      const exeAsset = release.assets.find(a => /^Vault[ .]Setup[ .].+\.exe$/.test(a.name))
       if (!exeAsset) {
         return { error: 'Latest release has no Windows installer attached.' }
       }

@@ -40,6 +40,7 @@ contextBridge.exposeInMainWorld('api', {
     getAll: (accountId?: number) => ipcRenderer.invoke('balances:getAll', accountId),
     getLatest: () => ipcRenderer.invoke('balances:getLatest'),
     save: (data: unknown) => ipcRenderer.invoke('balances:save', data),
+    delete: (id: number) => ipcRenderer.invoke('balances:delete', id),
   },
 
   // Weekly Allocations
@@ -47,6 +48,20 @@ contextBridge.exposeInMainWorld('api', {
     getWeek: (weekStart: string) => ipcRenderer.invoke('allocations:getWeek', weekStart),
     upsert: (data: unknown) => ipcRenderer.invoke('allocations:upsert', data),
     setFunded: (id: number, funded: boolean) => ipcRenderer.invoke('allocations:setFunded', id, funded),
+  },
+
+  // Transfers (Weekly Move)
+  transfers: {
+    getWeek: (weekStart: string) => ipcRenderer.invoke('transfers:getWeek', weekStart),
+    save: (data: unknown) => ipcRenderer.invoke('transfers:save', data),
+    delete: (id: number) => ipcRenderer.invoke('transfers:delete', id),
+  },
+
+  // Pay event overrides (per-week pay amount adjustments)
+  payOverrides: {
+    getWeek: (weekStart: string) => ipcRenderer.invoke('payOverrides:getWeek', weekStart),
+    upsert: (data: unknown) => ipcRenderer.invoke('payOverrides:upsert', data),
+    delete: (incomeSourceId: number, weekStart: string) => ipcRenderer.invoke('payOverrides:delete', incomeSourceId, weekStart),
   },
 
   // Goals

@@ -22,6 +22,16 @@ function initSchema(db: Database.Database): void {
   try { db.exec('ALTER TABLE expenses ADD COLUMN allocation_amount REAL') } catch {}
   try { db.exec('ALTER TABLE expenses ADD COLUMN weekly_extra REAL') } catch {}
   try { db.exec('ALTER TABLE income_sources ADD COLUMN payday_reference TEXT') } catch {}
+  // v1.13.0 — pay range (for variable income like shift work)
+  try { db.exec('ALTER TABLE income_sources ADD COLUMN min_amount REAL') } catch {}
+  try { db.exec('ALTER TABLE income_sources ADD COLUMN max_amount REAL') } catch {}
+  // v1.11.0 — percentage-based expense allocations
+  try { db.exec('ALTER TABLE expenses ADD COLUMN is_percentage INTEGER NOT NULL DEFAULT 0') } catch {}
+  try { db.exec('ALTER TABLE expenses ADD COLUMN percentage_basis TEXT') } catch {}
+  try { db.exec('ALTER TABLE expenses ADD COLUMN percentage_value REAL') } catch {}
+  try { db.exec('ALTER TABLE expenses ADD COLUMN percentage_pay_id INTEGER REFERENCES income_sources(id) ON DELETE SET NULL') } catch {}
+  // v1.10.3 — single-person funding attribution
+  try { db.exec('ALTER TABLE expenses ADD COLUMN funded_by_income_id INTEGER REFERENCES income_sources(id) ON DELETE SET NULL') } catch {}
   // v1.5.0 — money flow architecture
   try { db.exec('ALTER TABLE expenses ADD COLUMN save_account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL') } catch {}
   try { db.exec('ALTER TABLE expenses ADD COLUMN debit_account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL') } catch {}
@@ -101,6 +111,26 @@ function initSchema(db: Database.Database): void {
       snapshot_date TEXT NOT NULL DEFAULT (date('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS pay_event_overrides (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      income_source_id INTEGER NOT NULL REFERENCES income_sources(id) ON DELETE CASCADE,
+      week_start TEXT NOT NULL,
+      amount REAL NOT NULL,
+      notes TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(income_source_id, week_start)
+    );
+
+    CREATE TABLE IF NOT EXISTS transfers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      from_account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      to_account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      amount REAL NOT NULL,
+      week_start TEXT NOT NULL,
+      notes TEXT,
+      transfer_date TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS test_runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       version TEXT NOT NULL,
@@ -151,15 +181,15 @@ export function dbGetIncomeSources() {
   return getDb().prepare('SELECT * FROM income_sources ORDER BY person_name').all()
 }
 
-export function dbSaveIncomeSource(data: { person_name: string; amount: number; frequency: string; payday_reference?: string }) {
+export function dbSaveIncomeSource(data: { person_name: string; amount: number; frequency: string; payday_reference?: string; min_amount?: number; max_amount?: number }) {
   const stmt = getDb().prepare(
-    'INSERT INTO income_sources (person_name, amount, frequency, payday_reference) VALUES (?, ?, ?, ?)'
+    'INSERT INTO income_sources (person_name, amount, frequency, payday_reference, min_amount, max_amount) VALUES (?, ?, ?, ?, ?, ?)'
   )
-  const result = stmt.run(data.person_name, data.amount, data.frequency, data.payday_reference ?? null)
+  const result = stmt.run(data.person_name, data.amount, data.frequency, data.payday_reference ?? null, data.min_amount ?? null, data.max_amount ?? null)
   return getDb().prepare('SELECT * FROM income_sources WHERE id = ?').get(result.lastInsertRowid)
 }
 
-export function dbUpdateIncomeSource(id: number, data: Partial<{ person_name: string; amount: number; frequency: string }>) {
+export function dbUpdateIncomeSource(id: number, data: Partial<{ person_name: string; amount: number; frequency: string; payday_reference: string | null; min_amount: number | null; max_amount: number | null }>) {
   const fields = Object.keys(data).map(k => `${k} = ?`).join(', ')
   const values = [...Object.values(data), id]
   getDb().prepare(`UPDATE income_sources SET ${fields} WHERE id = ?`).run(...values)
@@ -178,28 +208,37 @@ export function dbGetExpenses() {
       sa.name as save_account_name, sa.color as save_account_color,
       da.name as debit_account_name, da.color as debit_account_color,
       COALESCE(sa.name, a.name) as account_name,
-      COALESCE(sa.color, a.color) as account_color
+      COALESCE(sa.color, a.color) as account_color,
+      inc.person_name as funded_by_person_name
     FROM expenses e
     LEFT JOIN accounts a ON e.account_id = a.id
     LEFT JOIN accounts sa ON e.save_account_id = sa.id
     LEFT JOIN accounts da ON e.debit_account_id = da.id
+    LEFT JOIN income_sources inc ON e.funded_by_income_id = inc.id
     ORDER BY e.name
   `).all()
 }
 
 export function dbSaveExpense(data: {
   name: string; amount: number; allocation_amount?: number; weekly_extra?: number; frequency: string;
-  due_day?: number; account_id?: number; save_account_id?: number; debit_account_id?: number; category: string
+  due_day?: number; account_id?: number; save_account_id?: number; debit_account_id?: number;
+  funded_by_income_id?: number; category: string;
+  is_percentage?: boolean; percentage_basis?: string; percentage_value?: number; percentage_pay_id?: number
 }) {
   const saveId = data.save_account_id ?? data.account_id ?? null
   const stmt = getDb().prepare(
-    'INSERT INTO expenses (name, amount, allocation_amount, weekly_extra, frequency, due_day, account_id, save_account_id, debit_account_id, category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    'INSERT INTO expenses (name, amount, allocation_amount, weekly_extra, frequency, due_day, account_id, save_account_id, debit_account_id, funded_by_income_id, category, is_percentage, percentage_basis, percentage_value, percentage_pay_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
   )
   const result = stmt.run(
     data.name, data.amount, data.allocation_amount ?? null, data.weekly_extra ?? null,
     data.frequency, data.due_day ?? null,
     saveId, saveId, data.debit_account_id ?? null,
-    data.category
+    data.funded_by_income_id ?? null,
+    data.category,
+    data.is_percentage ? 1 : 0,
+    data.percentage_basis ?? null,
+    data.percentage_value ?? null,
+    data.percentage_pay_id ?? null
   )
   return getDb().prepare('SELECT * FROM expenses WHERE id = ?').get(result.lastInsertRowid)
 }
@@ -207,12 +246,22 @@ export function dbSaveExpense(data: {
 export function dbUpdateExpense(id: number, data: Partial<{
   name: string; amount: number; allocation_amount: number | null; weekly_extra: number | null;
   frequency: string; due_day: number; account_id: number; save_account_id: number;
-  debit_account_id: number; category: string
+  debit_account_id: number; funded_by_income_id: number | null; category: string;
+  is_percentage: number | boolean; percentage_basis: string | null; percentage_value: number | null;
+  percentage_pay_id: number | null
 }>) {
   const entries = Object.entries(data).filter(([, v]) => v !== undefined)
   if (entries.length === 0) return getDb().prepare('SELECT * FROM expenses WHERE id = ?').get(id)
   const fields = entries.map(([k]) => `${k} = ?`).join(', ')
-  const values = [...entries.map(([, v]) => v), id]
+  // better-sqlite3 only binds numbers/strings/bigints/buffers/null. Convert booleans → 0/1
+  // and any other non-bindable type to null defensively.
+  const values = [
+    ...entries.map(([, v]) => {
+      if (typeof v === 'boolean') return v ? 1 : 0
+      return v
+    }),
+    id,
+  ]
   getDb().prepare(`UPDATE expenses SET ${fields} WHERE id = ?`).run(...values)
   return getDb().prepare('SELECT * FROM expenses WHERE id = ?').get(id)
 }
@@ -252,6 +301,10 @@ export function dbSaveBalanceLog(data: { account_id: number; balance: number; no
   )
   const result = stmt.run(data.account_id, data.balance, data.notes ?? null)
   return getDb().prepare('SELECT * FROM balance_logs WHERE id = ?').get(result.lastInsertRowid)
+}
+
+export function dbDeleteBalanceLog(id: number) {
+  getDb().prepare('DELETE FROM balance_logs WHERE id = ?').run(id)
 }
 
 // ─── Weekly Allocations ───────────────────────────────────────────────────────
@@ -338,6 +391,70 @@ export function dbGetGoalSnapshots(goalId: number) {
   return getDb().prepare(
     'SELECT * FROM goal_snapshots WHERE goal_id = ? ORDER BY snapshot_date'
   ).all(goalId)
+}
+
+// ─── Pay Event Overrides ──────────────────────────────────────────────────────
+
+export function dbGetPayOverridesForWeek(weekStart: string) {
+  return getDb().prepare(`
+    SELECT po.*, i.person_name, i.frequency, i.amount as base_amount
+    FROM pay_event_overrides po
+    JOIN income_sources i ON po.income_source_id = i.id
+    WHERE po.week_start = ?
+  `).all(weekStart)
+}
+
+export function dbUpsertPayOverride(data: {
+  income_source_id: number; week_start: string; amount: number; notes?: string
+}) {
+  const existing = getDb().prepare(
+    'SELECT id FROM pay_event_overrides WHERE income_source_id = ? AND week_start = ?'
+  ).get(data.income_source_id, data.week_start) as { id: number } | undefined
+
+  if (existing) {
+    getDb().prepare(
+      'UPDATE pay_event_overrides SET amount = ?, notes = ? WHERE id = ?'
+    ).run(data.amount, data.notes ?? null, existing.id)
+    return getDb().prepare('SELECT * FROM pay_event_overrides WHERE id = ?').get(existing.id)
+  }
+  const result = getDb().prepare(
+    'INSERT INTO pay_event_overrides (income_source_id, week_start, amount, notes) VALUES (?, ?, ?, ?)'
+  ).run(data.income_source_id, data.week_start, data.amount, data.notes ?? null)
+  return getDb().prepare('SELECT * FROM pay_event_overrides WHERE id = ?').get(result.lastInsertRowid)
+}
+
+export function dbDeletePayOverride(incomeSourceId: number, weekStart: string) {
+  getDb().prepare(
+    'DELETE FROM pay_event_overrides WHERE income_source_id = ? AND week_start = ?'
+  ).run(incomeSourceId, weekStart)
+}
+
+// ─── Transfers (Weekly Move) ──────────────────────────────────────────────────
+
+export function dbGetTransfersForWeek(weekStart: string) {
+  return getDb().prepare(`
+    SELECT t.*,
+      fa.name as from_account_name, fa.color as from_account_color,
+      ta.name as to_account_name, ta.color as to_account_color
+    FROM transfers t
+    LEFT JOIN accounts fa ON t.from_account_id = fa.id
+    LEFT JOIN accounts ta ON t.to_account_id = ta.id
+    WHERE t.week_start = ?
+    ORDER BY t.transfer_date DESC
+  `).all(weekStart)
+}
+
+export function dbSaveTransfer(data: {
+  from_account_id: number; to_account_id: number; amount: number; week_start: string; notes?: string
+}) {
+  const result = getDb().prepare(
+    'INSERT INTO transfers (from_account_id, to_account_id, amount, week_start, notes) VALUES (?, ?, ?, ?, ?)'
+  ).run(data.from_account_id, data.to_account_id, data.amount, data.week_start, data.notes ?? null)
+  return getDb().prepare('SELECT * FROM transfers WHERE id = ?').get(result.lastInsertRowid)
+}
+
+export function dbDeleteTransfer(id: number) {
+  getDb().prepare('DELETE FROM transfers WHERE id = ?').run(id)
 }
 
 // ─── Test Runs ────────────────────────────────────────────────────────────────

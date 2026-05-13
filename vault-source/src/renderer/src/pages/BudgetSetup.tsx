@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Plus, Pencil, Trash2, User, Wallet, Receipt } from 'lucide-react'
+import { Plus, Pencil, Trash2, User, Wallet, Receipt, Search, ChevronDown, ChevronRight, ArrowRight } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@renderer/components/ui/card'
 import { Button } from '@renderer/components/ui/button'
 import { Input } from '@renderer/components/ui/input'
@@ -7,8 +7,8 @@ import { Badge } from '@renderer/components/ui/badge'
 import { Dialog, DialogContent, DialogTrigger, DialogClose } from '@renderer/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@renderer/components/ui/select'
 import { formatCurrency } from '@renderer/lib/utils'
-import { toWeeklyAmount, ACCOUNT_COLORS, EXPENSE_CATEGORIES, ACCOUNT_TYPE_OPTIONS } from '@renderer/types'
-import type { Account, IncomeSource, Expense, AccountType } from '@renderer/types'
+import { toWeeklyAmount, ACCOUNT_COLORS, EXPENSE_CATEGORIES, ACCOUNT_TYPE_OPTIONS, computeWeeklyCashflow } from '@renderer/types'
+import type { Account, IncomeSource, Expense, AccountType, Goal } from '@renderer/types'
 import { ConfirmDialog } from '@renderer/components/ui/confirm-dialog'
 import { useToast } from '@renderer/components/ui/toast'
 
@@ -25,6 +25,7 @@ const EXPENSE_FREQ_OPTIONS = [
   ...FREQ_OPTIONS,
   { value: 'quarterly', label: 'Quarterly' },
   { value: 'annual', label: 'Annual' },
+  { value: 'per_pay', label: 'Per pay (requires Funded by)' },
 ]
 
 export default function BudgetSetup() {
@@ -32,24 +33,29 @@ export default function BudgetSetup() {
   const [income, setIncome] = useState<IncomeSource[]>([])
   const [accounts, setAccounts] = useState<Account[]>([])
   const [expenses, setExpenses] = useState<Expense[]>([])
+  const [goals, setGoals] = useState<Goal[]>([])
 
   useEffect(() => { loadAll() }, [])
 
   async function loadAll() {
-    const [inc, acc, exp] = await Promise.all([
+    const [inc, acc, exp, gls] = await Promise.all([
       window.api.income.getAll(),
       window.api.accounts.getAll(),
       window.api.expenses.getAll(),
+      window.api.goals.getAll(),
     ])
     setIncome(inc)
     setAccounts(acc)
     setExpenses(exp)
+    setGoals(gls as Goal[])
   }
 
-  const weeklyIncome = income.reduce((sum, s) => sum + toWeeklyAmount(s.amount, s.frequency), 0)
+  const cf = computeWeeklyCashflow(expenses, income, goals)
+  const weeklyIncome = cf.weeklyIncome
   const weeklyExpenses = expenses.reduce((sum, e) => sum + toWeeklyAmount(e.amount, e.frequency), 0)
-  const weeklyAllocations = expenses.reduce((sum, e) => sum + toWeeklyAmount(e.allocation_amount ?? e.amount, e.frequency) + (e.weekly_extra ?? 0), 0)
-  const freeCashflow = weeklyIncome - weeklyAllocations
+  const weeklyAllocations = cf.totalAllocations
+  const activeGoalContributions = cf.goalContributions
+  const freeCashflow = cf.freeCashflow
 
   return (
     <div className="p-6 space-y-6 animate-fade-in">
@@ -60,13 +66,25 @@ export default function BudgetSetup() {
 
       {/* Summary strip */}
       <div className="grid grid-cols-3 gap-4">
-        <SummaryCard label="Weekly Income" value={weeklyIncome} color="success" />
-        <SummaryCard label="Weekly Expenses" value={weeklyExpenses} color="warning" />
+        <SummaryCard
+          label="Weekly Income"
+          value={weeklyIncome}
+          color="success"
+          hint={income.length > 1 ? `Combined from ${income.length} sources` : undefined}
+        />
+        <SummaryCard
+          label="Weekly Allocations"
+          value={weeklyAllocations}
+          color="warning"
+          hint={cf.percentageAllocations > 0
+            ? `${formatCurrency(cf.fixedAllocations)} fixed + ${formatCurrency(cf.percentageAllocations)} from %`
+            : `Bills + buffers (raw cost ${formatCurrency(weeklyExpenses)})`}
+        />
         <SummaryCard
           label="Free Cashflow"
           value={freeCashflow}
           color={freeCashflow >= 0 ? 'success' : 'danger'}
-          hint={weeklyAllocations !== weeklyExpenses ? `Allocating ${formatCurrency(weeklyAllocations)}/wk` : undefined}
+          hint={`${formatCurrency(weeklyIncome)} income − ${formatCurrency(weeklyAllocations)} allocations${activeGoalContributions > 0 ? ` − ${formatCurrency(activeGoalContributions)} goals` : ''}`}
         />
       </div>
 
@@ -99,7 +117,7 @@ export default function BudgetSetup() {
         <AccountsTab accounts={accounts} onRefresh={loadAll} />
       )}
       {tab === 'expenses' && (
-        <ExpensesTab expenses={expenses} accounts={accounts} onRefresh={loadAll} />
+        <ExpensesTab expenses={expenses} accounts={accounts} income={income} effective={cf.effective} onRefresh={loadAll} />
       )}
     </div>
   )
@@ -128,27 +146,38 @@ function IncomeTab({ income, onRefresh }: { income: IncomeSource[]; onRefresh: (
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState<IncomeSource | null>(null)
   const [confirmId, setConfirmId] = useState<number | null>(null)
-  const [form, setForm] = useState({ person_name: '', amount: '', frequency: 'fortnightly', payday_reference: '' })
+  const [form, setForm] = useState({ person_name: '', amount: '', frequency: 'fortnightly', payday_reference: '', min_amount: '', max_amount: '' })
   const { toast } = useToast()
 
   function openAdd() {
     setEditing(null)
-    setForm({ person_name: '', amount: '', frequency: 'fortnightly', payday_reference: '' })
+    setForm({ person_name: '', amount: '', frequency: 'fortnightly', payday_reference: '', min_amount: '', max_amount: '' })
     setOpen(true)
   }
 
   function openEdit(src: IncomeSource) {
     setEditing(src)
-    setForm({ person_name: src.person_name, amount: String(src.amount), frequency: src.frequency, payday_reference: src.payday_reference ?? '' })
+    setForm({
+      person_name: src.person_name,
+      amount: String(src.amount),
+      frequency: src.frequency,
+      payday_reference: src.payday_reference ?? '',
+      min_amount: src.min_amount != null ? String(src.min_amount) : '',
+      max_amount: src.max_amount != null ? String(src.max_amount) : '',
+    })
     setOpen(true)
   }
 
   async function handleSave() {
+    const minParsed = parseFloat(form.min_amount)
+    const maxParsed = parseFloat(form.max_amount)
     const data = {
       person_name: form.person_name,
       amount: parseFloat(form.amount) || 0,
       frequency: form.frequency as IncomeSource['frequency'],
       payday_reference: form.payday_reference || undefined,
+      min_amount: !isNaN(minParsed) && minParsed > 0 ? minParsed : undefined,
+      max_amount: !isNaN(maxParsed) && maxParsed > 0 ? maxParsed : undefined,
     }
     if (editing) {
       await window.api.income.update(editing.id, data)
@@ -180,13 +209,46 @@ function IncomeTab({ income, onRefresh }: { income: IncomeSource[]; onRefresh: (
           <DialogContent title={editing ? 'Edit Income' : 'Add Income Source'}>
             <div className="space-y-4">
               <Input label="Person's name" placeholder="e.g. James" value={form.person_name} onChange={e => setForm(f => ({ ...f, person_name: e.target.value }))} />
-              <Input label="Amount" type="number" prefix="$" placeholder="0.00" value={form.amount} onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} />
+              <Input
+                label="Average pay ($)"
+                type="number"
+                prefix="$"
+                placeholder="0.00"
+                value={form.amount}
+                onChange={e => setForm(f => ({ ...f, amount: e.target.value }))}
+                hint="The typical/expected amount per pay event. Used as the planning default."
+              />
               <Select value={form.frequency} onValueChange={v => setForm(f => ({ ...f, frequency: v }))}>
                 <SelectTrigger label="Pay frequency"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {FREQ_OPTIONS.map(o => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
                 </SelectContent>
               </Select>
+
+              <div className="rounded-lg border border-border bg-surface-2/40 p-3 space-y-3">
+                <p className="text-[11px] text-text-muted">
+                  <span className="font-medium text-text-secondary">Pay range (optional)</span> — for variable income like shift work. Shown in the Pay Calendar as a low–high band so you can plan around lean vs flush weeks.
+                </p>
+                <div className="grid grid-cols-2 gap-3">
+                  <Input
+                    label="Lowest typical ($)"
+                    type="number"
+                    prefix="$"
+                    placeholder="—"
+                    value={form.min_amount}
+                    onChange={e => setForm(f => ({ ...f, min_amount: e.target.value }))}
+                  />
+                  <Input
+                    label="Highest typical ($)"
+                    type="number"
+                    prefix="$"
+                    placeholder="—"
+                    value={form.max_amount}
+                    onChange={e => setForm(f => ({ ...f, max_amount: e.target.value }))}
+                  />
+                </div>
+              </div>
+
               <Input
                 label="First payday date (optional)"
                 type="date"
@@ -231,6 +293,13 @@ function IncomeTab({ income, onRefresh }: { income: IncomeSource[]; onRefresh: (
                         <span> · {formatCurrency(toWeeklyAmount(src.amount, src.frequency))}/wk</span>
                       )}
                     </p>
+                    {(src.min_amount != null || src.max_amount != null) && (
+                      <p className="text-[10px] text-accent mt-0.5">
+                        Range: {src.min_amount != null ? formatCurrency(src.min_amount) : '—'}
+                        {' – '}
+                        {src.max_amount != null ? formatCurrency(src.max_amount) : '—'}
+                      </p>
+                    )}
                   </div>
                   <div className="flex gap-1">
                     <Button size="icon" variant="ghost" onClick={() => openEdit(src)}><Pencil size={13} /></Button>
@@ -450,21 +519,37 @@ function AccountsTab({ accounts, onRefresh }: { accounts: Account[]; onRefresh: 
 
 // ─── Expenses Tab ─────────────────────────────────────────────────────────────
 
-function ExpensesTab({ expenses, accounts, onRefresh }: { expenses: Expense[]; accounts: Account[]; onRefresh: () => void }) {
+function ExpensesTab({ expenses, accounts, income, effective, onRefresh }: { expenses: Expense[]; accounts: Account[]; income: IncomeSource[]; effective: Record<number, number>; onRefresh: () => void }) {
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState<Expense | null>(null)
   const [confirmId, setConfirmId] = useState<number | null>(null)
+  const [search, setSearch] = useState('')
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const [didDefaultCollapse, setDidDefaultCollapse] = useState(false)
   const { toast } = useToast()
   const [form, setForm] = useState({
     name: '', amount: '', allocation_amount: '', weekly_extra: '', frequency: 'monthly', due_day: '',
-    save_account_id: '', debit_account_id: '', category: 'Bills & Utilities'
+    save_account_id: '', debit_account_id: '', funded_by_income_id: '', category: 'Bills & Utilities',
+    is_percentage: false,
+    percentage_basis: 'free_cashflow' as 'free_cashflow' | 'combined_income' | 'specific_pay',
+    percentage_value: '',
+    percentage_pay_id: '',
   })
+
+  function toggleCategory(cat: string) {
+    setCollapsed(prev => {
+      const next = new Set(prev)
+      if (next.has(cat)) next.delete(cat); else next.add(cat)
+      return next
+    })
+  }
 
   function openAdd() {
     setEditing(null)
     setForm({
       name: '', amount: '', allocation_amount: '', weekly_extra: '', frequency: 'monthly', due_day: '',
-      save_account_id: '', debit_account_id: '', category: 'Bills & Utilities'
+      save_account_id: '', debit_account_id: '', funded_by_income_id: '', category: 'Bills & Utilities',
+      is_percentage: false, percentage_basis: 'free_cashflow', percentage_value: '', percentage_pay_id: '',
     })
     setOpen(true)
   }
@@ -479,7 +564,12 @@ function ExpensesTab({ expenses, accounts, onRefresh }: { expenses: Expense[]; a
       due_day: exp.due_day ? String(exp.due_day) : '',
       save_account_id: exp.save_account_id ? String(exp.save_account_id) : (exp.account_id ? String(exp.account_id) : ''),
       debit_account_id: exp.debit_account_id ? String(exp.debit_account_id) : '',
+      funded_by_income_id: exp.funded_by_income_id ? String(exp.funded_by_income_id) : '',
       category: exp.category,
+      is_percentage: !!exp.is_percentage,
+      percentage_basis: (exp.percentage_basis ?? 'free_cashflow') as any,
+      percentage_value: exp.percentage_value != null ? String(exp.percentage_value) : '',
+      percentage_pay_id: exp.percentage_pay_id ? String(exp.percentage_pay_id) : '',
     })
     setOpen(true)
   }
@@ -497,7 +587,14 @@ function ExpensesTab({ expenses, accounts, onRefresh }: { expenses: Expense[]; a
       due_day: form.due_day ? parseInt(form.due_day) : undefined,
       save_account_id: form.save_account_id ? parseInt(form.save_account_id) : undefined,
       debit_account_id: form.debit_account_id ? parseInt(form.debit_account_id) : undefined,
+      funded_by_income_id: form.funded_by_income_id ? parseInt(form.funded_by_income_id) : undefined,
       category: form.category,
+      is_percentage: form.is_percentage,
+      percentage_basis: form.is_percentage ? form.percentage_basis : undefined,
+      percentage_value: form.is_percentage ? (parseFloat(form.percentage_value) || 0) : undefined,
+      percentage_pay_id: form.is_percentage && form.percentage_basis === 'specific_pay' && form.percentage_pay_id
+        ? parseInt(form.percentage_pay_id)
+        : undefined,
     }
     if (editing) {
       await window.api.expenses.update(editing.id, data)
@@ -516,10 +613,48 @@ function ExpensesTab({ expenses, accounts, onRefresh }: { expenses: Expense[]; a
     onRefresh()
   }
 
+  const q = search.trim().toLowerCase()
+  const filtered = q
+    ? expenses.filter(e =>
+        e.name.toLowerCase().includes(q) ||
+        e.category.toLowerCase().includes(q) ||
+        (e.save_account_name?.toLowerCase().includes(q) ?? false) ||
+        (e.account_name?.toLowerCase().includes(q) ?? false)
+      )
+    : expenses
+
   const grouped = EXPENSE_CATEGORIES.reduce((acc, cat) => {
-    acc[cat] = expenses.filter(e => e.category === cat)
+    acc[cat] = filtered.filter(e => e.category === cat)
     return acc
   }, {} as Record<string, Expense[]>)
+
+  // Categories present (sorted by item count desc — biggest first)
+  const activeCategories = EXPENSE_CATEGORIES
+    .filter(cat => grouped[cat].length > 0)
+    .sort((a, b) => grouped[b].length - grouped[a].length)
+
+  // On first load with data, collapse everything except the biggest category.
+  // Keeps the page short by default; user can toggle as they wish.
+  useEffect(() => {
+    if (didDefaultCollapse) return
+    if (expenses.length === 0) return
+    const cats = EXPENSE_CATEGORIES
+      .filter(cat => expenses.some(e => e.category === cat))
+      .map(cat => ({ cat, count: expenses.filter(e => e.category === cat).length }))
+      .sort((a, b) => b.count - a.count)
+    if (cats.length <= 1) {
+      setDidDefaultCollapse(true)
+      return
+    }
+    setCollapsed(new Set(cats.slice(1).map(c => c.cat)))
+    setDidDefaultCollapse(true)
+  }, [expenses, didDefaultCollapse])
+
+  // When searching, force-expand all categories
+  function isExpanded(cat: string): boolean {
+    if (q) return true
+    return !collapsed.has(cat)
+  }
 
   return (
     <div className="space-y-3">
@@ -532,6 +667,58 @@ function ExpensesTab({ expenses, accounts, onRefresh }: { expenses: Expense[]; a
           <DialogContent title={editing ? 'Edit Expense' : 'Add Expense'}>
             <div className="space-y-4">
               <Input label="Expense name" placeholder="e.g. Electricity, Netflix, Car Insurance" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
+
+              {/* Fixed vs percentage toggle */}
+              <div className="flex items-center bg-surface-2 rounded-lg border border-border p-1">
+                <button
+                  type="button"
+                  onClick={() => setForm(f => ({ ...f, is_percentage: false }))}
+                  className={`flex-1 text-xs py-1.5 rounded transition-colors ${
+                    !form.is_percentage ? 'bg-accent text-white' : 'text-text-secondary hover:text-text-primary'
+                  }`}
+                >
+                  Fixed amount
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setForm(f => ({ ...f, is_percentage: true }))}
+                  className={`flex-1 text-xs py-1.5 rounded transition-colors ${
+                    form.is_percentage ? 'bg-accent text-white' : 'text-text-secondary hover:text-text-primary'
+                  }`}
+                >
+                  % of pay
+                </button>
+              </div>
+
+              {/* Percentage-mode fields */}
+              {form.is_percentage && (
+                <div className="rounded-lg border border-border bg-surface-2/40 p-3 space-y-3">
+                  <Select value={form.percentage_basis} onValueChange={v => setForm(f => ({ ...f, percentage_basis: v as any }))}>
+                    <SelectTrigger label="Take % of"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="free_cashflow">Free cashflow (what's left after fixed bills + goals)</SelectItem>
+                      <SelectItem value="combined_income">Combined weekly income</SelectItem>
+                      {income.length > 0 && <SelectItem value="specific_pay">A specific person's pay</SelectItem>}
+                    </SelectContent>
+                  </Select>
+                  {form.percentage_basis === 'specific_pay' && income.length > 0 && (
+                    <Select value={form.percentage_pay_id || (income[0] ? String(income[0].id) : '')} onValueChange={v => setForm(f => ({ ...f, percentage_pay_id: v }))}>
+                      <SelectTrigger label="Whose pay"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {income.map(src => <SelectItem key={src.id} value={String(src.id)}>{src.person_name}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  )}
+                  <Input
+                    label="Percentage (%)"
+                    type="number"
+                    placeholder="5"
+                    value={form.percentage_value}
+                    onChange={e => setForm(f => ({ ...f, percentage_value: e.target.value }))}
+                    hint="e.g. 5 = 5% of the chosen basis"
+                  />
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-3">
                 <Select value={form.frequency} onValueChange={v => setForm(f => ({ ...f, frequency: v }))}>
                   <SelectTrigger label="Frequency"><SelectValue /></SelectTrigger>
@@ -573,6 +760,16 @@ function ExpensesTab({ expenses, accounts, onRefresh }: { expenses: Expense[]; a
                   </SelectContent>
                 </Select>
               </div>
+              {income.length > 0 && (
+                <Select value={form.funded_by_income_id || 'shared'} onValueChange={v => setForm(f => ({ ...f, funded_by_income_id: v === 'shared' ? '' : v }))}>
+                  <SelectTrigger label="Funded by"><SelectValue placeholder="Shared (default)" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="shared">Shared (both pays)</SelectItem>
+                    {income.map(src => <SelectItem key={src.id} value={String(src.id)}>{src.person_name} only</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              )}
+
               <Select value={form.category} onValueChange={v => setForm(f => ({ ...f, category: v }))}>
                 <SelectTrigger label="Category"><SelectValue /></SelectTrigger>
                 <SelectContent>
@@ -591,54 +788,130 @@ function ExpensesTab({ expenses, accounts, onRefresh }: { expenses: Expense[]; a
       {expenses.length === 0 ? (
         <EmptyState icon={Receipt} text="No expenses yet" sub="Add your first expense above" />
       ) : (
-        <div className="space-y-4">
-          {EXPENSE_CATEGORIES.filter(cat => grouped[cat].length > 0).map(cat => (
-            <div key={cat}>
-              <p className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">{cat}</p>
-              <div className="space-y-2">
-                {grouped[cat].map(exp => (
-                  <Card key={exp.id} className="hover:border-border-subtle transition-colors">
-                    <CardContent className="pt-3 pb-3 flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        {(exp.save_account_color || exp.account_color) && (
-                          <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: exp.save_account_color ?? exp.account_color }} />
-                        )}
-                        <div>
-                          <p className="text-sm text-text-primary">{exp.name}</p>
-                          <p className="text-xs text-text-muted">
-                            {formatCurrency(exp.amount)} · {exp.frequency}
-                            {exp.allocation_amount && exp.allocation_amount !== exp.amount && (
-                              <span className="text-accent"> · allocating {formatCurrency(exp.allocation_amount)}</span>
-                            )}
-                            {exp.weekly_extra && exp.weekly_extra > 0 && (
-                              <span className="text-accent"> · +{formatCurrency(exp.weekly_extra)}/wk buffer</span>
-                            )}
-                            {exp.due_day && ` · due ${exp.due_day}${['th','st','nd','rd'][((exp.due_day % 100) - 20) % 10] || ['th','st','nd','rd'][exp.due_day % 100] || 'th'}`}
-                            {(exp.save_account_name || exp.account_name) && (
-                              <span> · {exp.save_account_name ?? exp.account_name}
-                                {exp.debit_account_name && exp.debit_account_name !== (exp.save_account_name ?? exp.account_name) && (
-                                  <span className="text-text-secondary"> → {exp.debit_account_name}</span>
-                                )}
-                              </span>
-                            )}
-                          </p>
+        <div className="space-y-3">
+          {/* Search bar */}
+          <div className="relative">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" />
+            <input
+              type="text"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder={`Search ${expenses.length} expenses…`}
+              className="w-full bg-surface border border-border rounded-lg pl-9 pr-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent transition-colors"
+            />
+            {q && (
+              <button
+                onClick={() => setSearch('')}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-primary text-xs"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+
+          {activeCategories.length === 0 ? (
+            <p className="text-center text-sm text-text-muted py-8">No expenses match "{search}".</p>
+          ) : activeCategories.map(cat => {
+            const items = grouped[cat]
+            const weeklyTotal = items.reduce((s, e) => s + (effective[e.id] ?? 0), 0)
+            const expanded = isExpanded(cat)
+            return (
+              <div key={cat} className="rounded-xl border border-border bg-surface overflow-hidden">
+                {/* Category header */}
+                <button
+                  onClick={() => toggleCategory(cat)}
+                  className="w-full flex items-center justify-between px-4 py-3 hover:bg-surface-hover transition-colors group"
+                >
+                  <div className="flex items-center gap-2">
+                    {expanded
+                      ? <ChevronDown size={15} className="text-text-muted group-hover:text-text-secondary" />
+                      : <ChevronRight size={15} className="text-text-muted group-hover:text-text-secondary" />
+                    }
+                    <span className="text-xs font-semibold text-text-secondary uppercase tracking-wider">{cat}</span>
+                    <span className="text-[11px] text-text-muted ml-1">{items.length} item{items.length === 1 ? '' : 's'}</span>
+                  </div>
+                  <span className="text-sm font-semibold text-text-primary tabular-nums">
+                    {formatCurrency(weeklyTotal)}<span className="text-[10px] text-text-muted">/wk</span>
+                  </span>
+                </button>
+
+                {/* Expanded grid */}
+                {expanded && (
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-2 p-3 pt-0 border-t border-border">
+                    {items.map(exp => {
+                      const dotColor = exp.save_account_color ?? exp.account_color
+                      const dueLabel = exp.due_day
+                        ? `${exp.due_day}${['th','st','nd','rd'][((exp.due_day % 100) - 20) % 10] || ['th','st','nd','rd'][exp.due_day % 100] || 'th'}`
+                        : null
+                      return (
+                        <div
+                          key={exp.id}
+                          className="group bg-surface-2/40 hover:bg-surface-2 border border-border rounded-lg p-3 transition-colors flex items-start gap-3"
+                        >
+                          {dotColor && <div className="w-1.5 h-1.5 rounded-full flex-shrink-0 mt-1.5" style={{ backgroundColor: dotColor }} />}
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-baseline justify-between gap-2">
+                              <p className="text-sm font-medium text-text-primary truncate">{exp.name}</p>
+                              <p className="text-sm font-semibold text-text-primary tabular-nums flex-shrink-0">
+                                {formatCurrency(effective[exp.id] ?? 0)}
+                                <span className="text-[10px] text-text-muted">/wk</span>
+                              </p>
+                            </div>
+                            <p className="text-[11px] text-text-muted mt-0.5">
+                              {exp.is_percentage ? (
+                                <>
+                                  <span className="text-accent">{exp.percentage_value}% of {
+                                    exp.percentage_basis === 'free_cashflow' ? 'free cashflow'
+                                    : exp.percentage_basis === 'combined_income' ? 'combined income'
+                                    : exp.percentage_basis === 'specific_pay' && exp.percentage_pay_id
+                                      ? (income.find(i => i.id === exp.percentage_pay_id)?.person_name ?? 'pay') + "'s pay"
+                                      : 'pay'
+                                  }</span>
+                                </>
+                              ) : (
+                                <>
+                                  {formatCurrency(exp.amount)} · {exp.frequency.replace('_', ' ')}
+                                  {dueLabel && ` · due ${dueLabel}`}
+                                  {exp.allocation_amount && exp.allocation_amount !== exp.amount && (
+                                    <span className="text-accent"> · alloc {formatCurrency(exp.allocation_amount)}</span>
+                                  )}
+                                  {exp.weekly_extra && exp.weekly_extra > 0 && (
+                                    <span className="text-accent"> · +{formatCurrency(exp.weekly_extra)}/wk</span>
+                                  )}
+                                </>
+                              )}
+                            </p>
+                            <div className="flex items-center gap-1 mt-1 text-[10px] text-text-secondary flex-wrap">
+                              {(exp.save_account_name || exp.account_name) && (
+                                <>
+                                  <span className="bg-surface border border-border rounded px-1.5 py-0.5">{exp.save_account_name ?? exp.account_name}</span>
+                                  {exp.debit_account_name && exp.debit_account_name !== (exp.save_account_name ?? exp.account_name) && (
+                                    <>
+                                      <ArrowRight size={9} className="text-text-muted" />
+                                      <span className="bg-surface border border-border rounded px-1.5 py-0.5">{exp.debit_account_name}</span>
+                                    </>
+                                  )}
+                                </>
+                              )}
+                              {exp.funded_by_person_name && (
+                                <span className="bg-accent/10 border border-accent/30 text-accent rounded px-1.5 py-0.5">
+                                  {exp.funded_by_person_name} only
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <div className="flex gap-0.5 opacity-50 group-hover:opacity-100 transition-opacity flex-shrink-0">
+                            <Button size="icon" variant="ghost" onClick={() => openEdit(exp)}><Pencil size={12} /></Button>
+                            <Button size="icon" variant="ghost" onClick={() => setConfirmId(exp.id)}><Trash2 size={12} className="text-danger" /></Button>
+                          </div>
                         </div>
-                      </div>
-                      <div className="flex items-center gap-3">
-                        <div className="text-right">
-                          <p className="text-sm font-medium text-text-secondary">{formatCurrency(toWeeklyAmount(exp.amount, exp.frequency))}<span className="text-[10px] text-text-muted">/wk</span></p>
-                        </div>
-                        <div className="flex gap-1">
-                          <Button size="icon" variant="ghost" onClick={() => openEdit(exp)}><Pencil size={13} /></Button>
-                          <Button size="icon" variant="ghost" onClick={() => setConfirmId(exp.id)}><Trash2 size={13} className="text-danger" /></Button>
-                        </div>
-                      </div>
-                    </CardContent>
-                  </Card>
-                ))}
+                      )
+                    })}
+                  </div>
+                )}
               </div>
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
       <ConfirmDialog

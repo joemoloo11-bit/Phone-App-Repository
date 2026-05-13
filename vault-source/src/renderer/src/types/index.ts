@@ -36,9 +36,11 @@ export interface AccountInput {
 export interface IncomeSource {
   id: number
   person_name: string
-  amount: number
+  amount: number  // primary planning amount (used as average for variable pay)
   frequency: 'weekly' | 'fortnightly' | 'monthly' | 'annual'
   payday_reference?: string
+  min_amount?: number  // optional: low end of variable pay range
+  max_amount?: number  // optional: high end of variable pay range
   created_at: string
 }
 
@@ -47,7 +49,11 @@ export interface IncomeSourceInput {
   amount: number
   frequency: 'weekly' | 'fortnightly' | 'monthly' | 'annual'
   payday_reference?: string
+  min_amount?: number
+  max_amount?: number
 }
+
+export type PercentageBasis = 'free_cashflow' | 'combined_income' | 'specific_pay'
 
 export interface Expense {
   id: number
@@ -55,11 +61,18 @@ export interface Expense {
   amount: number
   allocation_amount?: number
   weekly_extra?: number
-  frequency: 'weekly' | 'fortnightly' | 'monthly' | 'quarterly' | 'annual'
+  frequency: 'weekly' | 'fortnightly' | 'monthly' | 'quarterly' | 'annual' | 'per_pay'
   due_day?: number
   account_id?: number
   save_account_id?: number
   debit_account_id?: number
+  funded_by_income_id?: number
+  funded_by_person_name?: string
+  // Percentage allocations (v1.11.0)
+  is_percentage?: number  // 0 or 1
+  percentage_basis?: PercentageBasis
+  percentage_value?: number
+  percentage_pay_id?: number  // when basis = 'specific_pay'
   account_name?: string
   account_color?: string
   save_account_name?: string
@@ -75,12 +88,17 @@ export interface ExpenseInput {
   amount: number
   allocation_amount?: number
   weekly_extra?: number
-  frequency: 'weekly' | 'fortnightly' | 'monthly' | 'quarterly' | 'annual'
+  frequency: 'weekly' | 'fortnightly' | 'monthly' | 'quarterly' | 'annual' | 'per_pay'
   due_day?: number
   account_id?: number
   save_account_id?: number
   debit_account_id?: number
+  funded_by_income_id?: number
   category: string
+  is_percentage?: boolean
+  percentage_basis?: PercentageBasis
+  percentage_value?: number
+  percentage_pay_id?: number
 }
 
 export interface BalanceLog {
@@ -98,6 +116,40 @@ export interface BalanceLog {
 export interface BalanceLogInput {
   account_id: number
   balance: number
+  notes?: string
+}
+
+export interface PayOverride {
+  id: number
+  income_source_id: number
+  week_start: string
+  amount: number
+  notes?: string
+  created_at: string
+  person_name?: string
+  frequency?: string
+  base_amount?: number
+}
+
+export interface Transfer {
+  id: number
+  from_account_id: number
+  to_account_id: number
+  amount: number
+  week_start: string
+  notes?: string
+  transfer_date: string
+  from_account_name?: string
+  from_account_color?: string
+  to_account_name?: string
+  to_account_color?: string
+}
+
+export interface TransferInput {
+  from_account_id: number
+  to_account_id: number
+  amount: number
+  week_start: string
   notes?: string
 }
 
@@ -185,16 +237,24 @@ export const ACCOUNT_COLORS = [
   '#84CC16', // lime
 ] as const
 
-// Converts any expense frequency to a weekly equivalent amount
-export function toWeeklyAmount(amount: number, frequency: string): number {
+// Pay/expense frequency in weeks (used for amortization)
+export function payPeriodWeeks(frequency: string): number {
   switch (frequency) {
-    case 'weekly': return amount
-    case 'fortnightly': return amount / 2
-    case 'monthly': return amount / 4.33
-    case 'quarterly': return amount / 13
-    case 'annual': return amount / 52
-    default: return amount
+    case 'weekly': return 1
+    case 'fortnightly': return 2
+    case 'monthly': return 4.33
+    case 'quarterly': return 13
+    case 'annual': return 52
+    default: return 1
   }
+}
+
+// Converts any expense frequency to a weekly equivalent amount.
+// 'per_pay' returns 0 because it depends on which person's pay — use
+// getExpenseEffectiveWeekly or computeWeeklyCashflow for proper handling.
+export function toWeeklyAmount(amount: number, frequency: string): number {
+  if (frequency === 'per_pay') return 0
+  return amount / payPeriodWeeks(frequency)
 }
 
 // Converts any income frequency to a weekly equivalent amount
@@ -239,10 +299,166 @@ export function isPayWeek(reference: string, frequency: string, weekStart: strin
   return payday >= weekStartDate && payday < weekEndDate
 }
 
+// Single source of truth for weekly cashflow math.
+// Handles both fixed expenses and percentage-based ones.
+export interface CashflowResult {
+  weeklyIncome: number
+  fixedAllocations: number     // sum of non-percentage expenses (weekly equiv + buffer)
+  percentageAllocations: number  // sum of percentage expenses, evaluated
+  totalAllocations: number     // fixed + percentage
+  goalContributions: number
+  freeCashflow: number         // income - total - goals
+  // Per-expense effective weekly amount (for ranking / display)
+  effective: Record<number, number>
+}
+
+export function computeWeeklyCashflow(
+  expenses: Expense[],
+  income: IncomeSource[],
+  goals: Goal[]
+): CashflowResult {
+  const weeklyIncome = income.reduce((s, i) => s + toWeeklyAmount(i.amount, i.frequency), 0)
+  const goalContributions = goals
+    .filter(g => g.status === 'active')
+    .reduce((s, g) => s + g.weekly_contribution, 0)
+  const incomeById: Record<number, IncomeSource> = {}
+  income.forEach(i => { incomeById[i.id] = i })
+
+  // Pass 1: fixed (non-percentage) expenses
+  const effective: Record<number, number> = {}
+  const fixedExpenses = expenses.filter(e => !e.is_percentage)
+  const pctExpenses = expenses.filter(e => !!e.is_percentage)
+  let fixedAllocations = 0
+  for (const e of fixedExpenses) {
+    let wk: number
+    if (e.frequency === 'per_pay') {
+      // Amount is per pay event of the funded_by person. Convert to weekly using their period.
+      const payer = e.funded_by_income_id ? incomeById[e.funded_by_income_id] : null
+      const periodWeeks = payer ? payPeriodWeeks(payer.frequency) : 2
+      wk = (e.allocation_amount ?? e.amount) / periodWeeks + (e.weekly_extra ?? 0)
+    } else {
+      wk = toWeeklyAmount(e.allocation_amount ?? e.amount, e.frequency) + (e.weekly_extra ?? 0)
+    }
+    effective[e.id] = wk
+    fixedAllocations += wk
+  }
+
+  // Free cashflow available for % expenses to draw from
+  const freeBeforePct = Math.max(0, weeklyIncome - fixedAllocations - goalContributions)
+
+  // Pass 2: percentage expenses
+  let percentageAllocations = 0
+  for (const e of pctExpenses) {
+    const pct = (e.percentage_value ?? 0) / 100
+    let wk = 0
+    if (e.percentage_basis === 'free_cashflow') {
+      wk = freeBeforePct * pct
+    } else if (e.percentage_basis === 'combined_income') {
+      wk = weeklyIncome * pct
+    } else if (e.percentage_basis === 'specific_pay' && e.percentage_pay_id) {
+      const src = incomeById[e.percentage_pay_id]
+      if (src) wk = toWeeklyAmount(src.amount, src.frequency) * pct
+    }
+    effective[e.id] = wk
+    percentageAllocations += wk
+  }
+
+  const totalAllocations = fixedAllocations + percentageAllocations
+  const freeCashflow = weeklyIncome - totalAllocations - goalContributions
+
+  return {
+    weeklyIncome,
+    fixedAllocations,
+    percentageAllocations,
+    totalAllocations,
+    goalContributions,
+    freeCashflow,
+    effective,
+  }
+}
+
+// Per-pay-event contribution under the alternating-pay model.
+// Each pay event covers ONE WEEK of shared/joint expenses + goals (alternating
+// pays cover other weeks), plus the FULL pay period worth of items
+// attributed specifically to this person.
+export interface PayEventContribution {
+  payer: IncomeSource
+  arriving: number
+  attributedWeekly: number      // sum of expenses funded_by = payer (weekly equiv)
+  sharedWeekly: number          // sum of expenses with no funded_by (weekly equiv)
+  goalsWeekly: number           // total active goal contributions (weekly)
+  attributedPay: number         // attributedWeekly × payPeriodWeeks (full responsibility)
+  sharedShare: number           // sharedWeekly × 1 week (one week per pay)
+  goalsShare: number            // goalsWeekly × 1 week
+  totalOutflow: number          // sum of the three contributions
+  remaining: number             // arriving − totalOutflow
+}
+
+export function computePayEventContribution(
+  payer: IncomeSource,
+  effectivePay: number,
+  expenses: Expense[],
+  cashflow: CashflowResult
+): PayEventContribution {
+  const periodWeeks = payPeriodWeeks(payer.frequency)
+  let attributedWeekly = 0
+  let sharedWeekly = 0
+  for (const e of expenses) {
+    const w = cashflow.effective[e.id] ?? 0
+    if (w === 0) continue
+    if (e.funded_by_income_id === payer.id) attributedWeekly += w
+    else if (e.funded_by_income_id == null) sharedWeekly += w
+  }
+  const goalsWeekly = cashflow.goalContributions
+  const attributedPay = attributedWeekly * periodWeeks
+  const sharedShare = sharedWeekly * 1
+  const goalsShare = goalsWeekly * 1
+  const totalOutflow = attributedPay + sharedShare + goalsShare
+  return {
+    payer,
+    arriving: effectivePay,
+    attributedWeekly, sharedWeekly, goalsWeekly,
+    attributedPay, sharedShare, goalsShare,
+    totalOutflow,
+    remaining: effectivePay - totalOutflow,
+  }
+}
+
+// Effective weekly $ for a single expense, given context.
+// Falls back to fixed calc if no income/goals provided.
+export function getEffectiveWeekly(exp: Expense, expenses?: Expense[], income?: IncomeSource[], goals?: Goal[]): number {
+  if (!exp.is_percentage) {
+    return toWeeklyAmount(exp.allocation_amount ?? exp.amount, exp.frequency) + (exp.weekly_extra ?? 0)
+  }
+  if (!expenses || !income || !goals) return 0
+  const result = computeWeeklyCashflow(expenses, income, goals)
+  return result.effective[exp.id] ?? 0
+}
+
 // Returns number of days until the next payday (0 = today)
 export function daysUntilPayday(reference: string, frequency: string): number {
   const next = getNextPayday(reference, frequency)
   const today = new Date()
   today.setHours(0, 0, 0, 0)
   return Math.round((next.getTime() - today.getTime()) / 86400000)
+}
+
+// Returns every payday in the window [from, from + weeksAhead*7 days)
+export function getUpcomingPaydays(reference: string, frequency: string, weeksAhead: number, from: Date = new Date()): Date[] {
+  const start = new Date(from)
+  start.setHours(0, 0, 0, 0)
+  const end = new Date(start)
+  end.setDate(end.getDate() + weeksAhead * 7)
+
+  const dates: Date[] = []
+  let cursor = new Date(start)
+  for (let i = 0; i < 60 && cursor < end; i++) {
+    const next = getNextPayday(reference, frequency, cursor)
+    if (next >= end) break
+    if (dates.length === 0 || next.getTime() !== dates[dates.length - 1].getTime()) {
+      dates.push(new Date(next))
+    }
+    cursor = new Date(next.getTime() + 86400000) // advance one day past this payday
+  }
+  return dates
 }
